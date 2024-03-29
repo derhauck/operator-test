@@ -1,0 +1,27 @@
+# permissions for end users to view operatortests.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/name: clusterrole
+    app.kubernetes.io/instance: operatortest-viewer-role
+    app.kubernetes.io/component: rbac
+    app.kubernetes.io/created-by: operator-test
+    app.kubernetes.io/part-of: operator-test
+    app.kubernetes.io/managed-by: kustomize
+  name: operatortest-viewer-role
+rules:
+- apiGroups:
+  - crd.test.kateops.com
+  resources:
+  - operatortests
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - crd.test.kateops.com
+  resources:
+  - operatortests/status
+  verbs:
+  - get

@@ -1,0 +1,31 @@
+# permissions for end users to edit operatortests.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/name: clusterrole
+    app.kubernetes.io/instance: operatortest-editor-role
+    app.kubernetes.io/component: rbac
+    app.kubernetes.io/created-by: operator-test
+    app.kubernetes.io/part-of: operator-test
+    app.kubernetes.io/managed-by: kustomize
+  name: operatortest-editor-role
+rules:
+- apiGroups:
+  - crd.test.kateops.com
+  resources:
+  - operatortests
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - crd.test.kateops.com
+  resources:
+  - operatortests/status
+  verbs:
+  - get
