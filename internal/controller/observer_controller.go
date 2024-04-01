@@ -44,8 +44,8 @@ type ObserverReconciler struct {
 	Scheme *runtime.Scheme
 }
 
-const observerAnnotationTimeToDelete = "observer/ttd"
-const observerAnnotationProcessed = "observer/processed"
+const observerAnnotationTimeToDelete = "observer.crd.test.kateops.com/ttd"
+const observerAnnotationProcessed = "observer.crd.test.kateops.com/processed"
 const observerFinalizer = "crd.test.kateops.com/finalizer"
 
 func (r *ObserverReconciler) reFetchObserver(ctx context.Context, observer *crdv1.Observer) error {
@@ -189,7 +189,7 @@ func (r *ObserverReconciler) deletePod(ctx context.Context, observer *crdv1.Obse
 				ttd = time.Now().Add(-time.Second).Unix()
 			}
 			now := time.Now().Unix()
-			if now > time.Unix(ttd, 0).Unix() {
+			if now >= time.Unix(ttd, 0).Unix() {
 				if err := r.reFetchObserver(ctx, observer); err != nil {
 					return ctrl.Result{}, err
 				}
@@ -239,19 +239,61 @@ func (r *ObserverReconciler) deletePod(ctx context.Context, observer *crdv1.Obse
 	return reconcile.Result{}, nil
 }
 
+func (r *ObserverReconciler) createPod(ctx context.Context, observer *crdv1.Observer) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+	pod, err := observer.Spec.Entries[observer.Status.CurrentItem].NewPod(observer.Namespace)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	logger.Info("Creating new Pod", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
+	if err := ctrl.SetControllerReference(observer, pod, r.Scheme); err != nil {
+		return ctrl.Result{}, err
+	}
+	if err = r.Create(ctx, pod); err != nil {
+		logger.Error(err, "Failed to create new Pod", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
+		return ctrl.Result{}, err
+	}
+	observer.SetStatusCondition(
+		crdv1.TypeAvailableObserver,
+		metav1.ConditionTrue,
+		"Reconciling",
+		fmt.Sprintf("Created new Pod for crd %s", observer.Name),
+	)
+
+	if err := r.Status().Update(ctx, observer); err != nil {
+		logger.Error(err, "Failed to update Observer status")
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{}, nil
+}
+
+func (r *ObserverReconciler) iterateCurrentItem(ctx context.Context, observer *crdv1.Observer) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+	if err := r.reFetchObserver(ctx, observer); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	logger.Info("updating current item", "current", observer.Status.CurrentItem)
+	maxLength := len(observer.Spec.Entries) - 1
+	item := observer.Status.CurrentItem
+	item++
+	if item > maxLength {
+		item = 0
+	}
+	logger.Info("updating current item", "number", item)
+	observer.Status.CurrentItem = item
+
+	if err := r.Status().Update(ctx, observer); err != nil {
+		logger.Error(err, "Failed to update Observer status")
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{}, nil
+}
+
 //+kubebuilder:rbac:groups=crd.test.kateops.com,resources=observers,verbs=get;list;watch;create;update;patch;deleteObserver
 //+kubebuilder:rbac:groups=crd.test.kateops.com,resources=observers/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=crd.test.kateops.com,resources=observers/finalizers,verbs=update
 
-// Reconcile is part of the main kubernetes reconciliation loop which aims to
-// move the current state of the cluster closer to the desired state.
-// TODO(user): Modify the Reconcile function to compare the state specified by
-// the Observer object against the actual cluster state, and then
-// perform operations to make the cluster state reflect the state specified by
-// the user.
-//
-// For more details, check Reconcile and its Result here:
-// - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.17.0/pkg/reconcile
 func (r *ObserverReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
@@ -290,30 +332,19 @@ func (r *ObserverReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 
 	// create new Pod if not exists
 	found := &v1.Pod{}
-	if err := r.Get(ctx, types.NamespacedName{Name: observer.Name, Namespace: observer.Namespace}, found); err != nil {
-		if !errors.IsNotFound(err) {
+	if err := r.Get(ctx, types.NamespacedName{Name: observer.Spec.Entries[observer.Status.CurrentItem].Name, Namespace: observer.Namespace}, found); err != nil {
+		if errors.IsNotFound(err) {
+			if result, err := r.createPod(ctx, &observer); err != nil {
+				return result, err
+			}
+
+			result, err := r.iterateCurrentItem(ctx, &observer)
+			if err != nil {
+				return result, err
+			}
+
+		} else {
 			return reconcile.Result{}, err
-		}
-		pod, err := r.newPod(&observer)
-		if err != nil {
-			return ctrl.Result{}, err
-		}
-		logger.Info("Creating new Pod", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
-
-		if err = r.Create(ctx, pod); err != nil {
-			logger.Error(err, "Failed to create new Pod", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
-			return ctrl.Result{}, err
-		}
-		observer.SetStatusCondition(
-			crdv1.TypeAvailableObserver,
-			metav1.ConditionTrue,
-			"Reconciling",
-			fmt.Sprintf("Created new Pod for crd %s", observer.Name),
-		)
-
-		if err := r.Status().Update(ctx, &observer); err != nil {
-			logger.Error(err, "Failed to update Observer status")
-			return ctrl.Result{}, err
 		}
 	}
 	//logger.Info("Observer Reconcile Logic")
@@ -333,7 +364,7 @@ func (r *ObserverReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	)
 
 	if err := r.Status().Update(ctx, &observer); err != nil {
-		logger.Error(err, "Failed to update Observer status")
+		//logger.Error(err, "Failed to update Observer status")
 		return ctrl.Result{}, err
 	}
 	//logger.Info("Waiting for next loop in 1s")
@@ -417,35 +448,4 @@ func (r *ObserverReconciler) SetupWithManager(mgr ctrl.Manager) error {
 
 func (r *ObserverReconciler) doFinalizerOperationsForObserver(observer *crdv1.Observer) error {
 	return nil
-}
-
-func (r *ObserverReconciler) newPod(cr *crdv1.Observer) (*v1.Pod, error) {
-	labels := map[string]string{
-		"app":                          cr.Name,
-		"app.kubernetes.io/managed-by": "ObserverController",
-	}
-
-	pod := &v1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      cr.Name,
-			Namespace: cr.Namespace,
-			Labels:    labels,
-		},
-		Spec: v1.PodSpec{
-			Containers: []v1.Container{
-				{
-					Name:    "check",
-					Image:   "curlimages/curl:7.78.0",
-					Command: []string{"/bin/sh", "-c", fmt.Sprintf("curl -vvv -L %s", cr.Spec.Endpoint)},
-				},
-			},
-			RestartPolicy: v1.RestartPolicyOnFailure,
-		},
-	}
-
-	if err := ctrl.SetControllerReference(cr, pod, r.Scheme); err != nil {
-		return nil, err
-	}
-
-	return pod, nil
 }

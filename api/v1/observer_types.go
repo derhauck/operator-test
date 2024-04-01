@@ -17,6 +17,7 @@ limitations under the License.
 package v1
 
 import (
+	"fmt"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -26,6 +27,48 @@ import (
 // NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
 
 // ObserverSpec defines the desired state of Observer
+type ObserverSpecEntry struct {
+	Endpoint  string              `json:"endpoint"`
+	SecretRef *v1.SecretReference `json:"secretRef,omitempty"`
+	Name      string              `json:"name"`
+}
+
+func (o *ObserverSpecEntry) NewPod(namespace string) (*v1.Pod, error) {
+	labels := map[string]string{
+		"app.kubernetes.io/managed-by": "ObserverController",
+	}
+	container := v1.Container{
+		Name:    "check",
+		Image:   "curlimages/curl:7.78.0",
+		Command: []string{"/bin/sh", "-c", fmt.Sprintf("curl -vvv -L %s", o.Endpoint)},
+	}
+	pod := &v1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      o.Name,
+			Namespace: namespace,
+			Labels:    labels,
+		},
+		Spec: v1.PodSpec{
+			Containers: []v1.Container{
+				container,
+			},
+			RestartPolicy: v1.RestartPolicyNever,
+		},
+	}
+
+	if o.SecretRef != nil {
+		container.EnvFrom = []v1.EnvFromSource{
+			{
+				SecretRef: &v1.SecretEnvSource{
+					LocalObjectReference: v1.LocalObjectReference{
+						Name: o.SecretRef.Name,
+					},
+				},
+			},
+		}
+	}
+	return pod, nil
+}
 
 type ObserverSpec struct {
 	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
@@ -33,9 +76,8 @@ type ObserverSpec struct {
 
 	// Foo is an example field of Observer. Edit observer_types.go to remove/update
 
-	Endpoint  string             `json:"endpoint"`
-	SecretRef v1.SecretReference `json:"secretRef,omitempty"`
-	Interval  int                `json:"interval"`
+	Entries  []ObserverSpecEntry `json:"entries"`
+	Interval int                 `json:"interval"`
 }
 
 // ObserverStatus defines the observed state of Observer
@@ -49,7 +91,8 @@ type ObserverStatus struct {
 
 	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
 	// Important: Run "make" to regenerate code after modifying this file
-	Conditions []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type" protobuf:"bytes,1,rep,name=conditions"`
+	Conditions  []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type" protobuf:"bytes,1,rep,name=conditions"`
+	CurrentItem int                `json:"currentItem"`
 }
 
 //+kubebuilder:object:root=true

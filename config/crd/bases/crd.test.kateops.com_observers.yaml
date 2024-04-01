@@ -38,27 +38,38 @@ spec:
             type: object
           spec:
             properties:
-              endpoint:
-                type: string
+              entries:
+                items:
+                  description: ObserverSpec defines the desired state of Observer
+                  properties:
+                    endpoint:
+                      type: string
+                    name:
+                      type: string
+                    secretRef:
+                      description: |-
+                        SecretReference represents a Secret Reference. It has enough information to retrieve secret
+                        in any namespace
+                      properties:
+                        name:
+                          description: name is unique within a namespace to reference
+                            a secret resource.
+                          type: string
+                        namespace:
+                          description: namespace defines the space within which the
+                            secret name must be unique.
+                          type: string
+                      type: object
+                      x-kubernetes-map-type: atomic
+                  required:
+                  - endpoint
+                  - name
+                  type: object
+                type: array
               interval:
                 type: integer
-              secretRef:
-                description: |-
-                  SecretReference represents a Secret Reference. It has enough information to retrieve secret
-                  in any namespace
-                properties:
-                  name:
-                    description: name is unique within a namespace to reference a
-                      secret resource.
-                    type: string
-                  namespace:
-                    description: namespace defines the space within which the secret
-                      name must be unique.
-                    type: string
-                type: object
-                x-kubernetes-map-type: atomic
             required:
-            - endpoint
+            - entries
             - interval
             type: object
           status:
@@ -135,6 +146,10 @@ spec:
                   - type
                   type: object
                 type: array
+              currentItem:
+                type: integer
+            required:
+            - currentItem
             type: object
         type: object
     served: true
