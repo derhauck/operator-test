@@ -10,7 +10,7 @@ rules:
   - observers
   verbs:
   - create
-  - delete
+  - deleteObserver
   - get
   - list
   - patch
@@ -26,32 +26,6 @@ rules:
   - crd.test.kateops.com
   resources:
   - observers/status
-  verbs:
-  - get
-  - patch
-  - update
-- apiGroups:
-  - crd.test.kateops.com
-  resources:
-  - operatortests
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - crd.test.kateops.com
-  resources:
-  - operatortests/finalizers
-  verbs:
-  - update
-- apiGroups:
-  - crd.test.kateops.com
-  resources:
-  - operatortests/status
   verbs:
   - get
   - patch

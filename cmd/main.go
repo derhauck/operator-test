@@ -116,19 +116,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err = (&controller.OperatorTestReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "OperatorTest")
-		os.Exit(1)
-	}
-	if os.Getenv("ENABLE_WEBHOOKS") != "false" {
-		if err = (&crdv1.OperatorTest{}).SetupWebhookWithManager(mgr); err != nil {
-			setupLog.Error(err, "unable to create webhook", "webhook", "OperatorTest")
-			os.Exit(1)
-		}
-	}
 	if err = (&controller.ObserverReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),

@@ -20,18 +20,21 @@ import (
 	"context"
 	crdv1 "derhauck/operator-test/api/v1"
 	"fmt"
-	v12 "k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	"strconv"
 	"time"
 )
 
@@ -41,9 +44,202 @@ type ObserverReconciler struct {
 	Scheme *runtime.Scheme
 }
 
-const SEC = 1000000000
+const observerAnnotationTimeToDelete = "observer/ttd"
+const observerAnnotationProcessed = "observer/processed"
+const observerFinalizer = "crd.test.kateops.com/finalizer"
 
-//+kubebuilder:rbac:groups=crd.test.kateops.com,resources=observers,verbs=get;list;watch;create;update;patch;delete
+func (r *ObserverReconciler) reFetchObserver(ctx context.Context, observer *crdv1.Observer) error {
+	updatedObserver := crdv1.Observer{}
+	logger := log.FromContext(ctx)
+	namespacedName := types.NamespacedName{Name: observer.Name, Namespace: observer.Namespace}
+	if err := r.Get(ctx, namespacedName, &updatedObserver); err != nil {
+		logger.Error(err, "Failed to re-fetch Observer")
+		return err
+	}
+	observer = &updatedObserver
+
+	return nil
+}
+
+func (r *ObserverReconciler) checkConditions(ctx context.Context, observer *crdv1.Observer) (reconcile.Result, error) {
+	if observer.Status.Conditions == nil || len(observer.Status.Conditions) == 0 {
+		logger := log.FromContext(ctx)
+
+		if err := r.reFetchObserver(ctx, observer); err != nil {
+			return ctrl.Result{}, err
+		}
+
+		observer.SetStatusCondition(
+			crdv1.TypeAvailableObserver,
+			metav1.ConditionUnknown,
+			"Reconciling",
+			"Starting reconciliation",
+		)
+
+		if err := r.Status().Update(ctx, observer); err != nil {
+			logger.Error(err, "Failed to update Observer status")
+			return ctrl.Result{}, err
+		}
+	}
+	return reconcile.Result{}, nil
+}
+
+func (r *ObserverReconciler) addFinalizer(ctx context.Context, observer *crdv1.Observer) (reconcile.Result, error) {
+	logger := log.FromContext(ctx)
+
+	if !controllerutil.ContainsFinalizer(observer, observerFinalizer) {
+		logger.Info("Adding Finalizer to Observer")
+
+		if err := r.reFetchObserver(ctx, observer); err != nil {
+			return ctrl.Result{}, err
+		}
+
+		if ok := controllerutil.AddFinalizer(observer, observerFinalizer); !ok {
+			logger.Info("Failed to add finalizer into the custom resource")
+			return ctrl.Result{Requeue: true}, nil
+		}
+
+		if err := r.Update(ctx, observer); err != nil {
+			logger.Error(err, "Failed to update custom resource to add finalizer")
+			return ctrl.Result{}, err
+		}
+	}
+
+	return ctrl.Result{}, nil
+}
+
+func (r *ObserverReconciler) deleteObserver(ctx context.Context, observer *crdv1.Observer) (reconcile.Result, error) {
+	if controllerutil.ContainsFinalizer(observer, observerFinalizer) {
+		logger := log.FromContext(ctx)
+		logger.Info("Performing Finalizer Operations for Observer before deleting CR")
+
+		if err := r.reFetchObserver(ctx, observer); err != nil {
+			return ctrl.Result{}, err
+		}
+
+		observer.SetStatusCondition(
+			crdv1.TypeDegradedObserver,
+			metav1.ConditionUnknown,
+			"Finalizing",
+			fmt.Sprintf("Performing finalizer operations for the custom resource: %s ", observer.Name),
+		)
+
+		if err := r.Status().Update(ctx, observer); err != nil {
+			logger.Error(err, "Failed to update Observer status")
+			return ctrl.Result{}, err
+		}
+
+		if err := r.doFinalizerOperationsForObserver(observer); err != nil {
+			logger.Error(err, "Failed to execute Finalizers")
+			return ctrl.Result{Requeue: true}, err
+		}
+
+		if err := r.reFetchObserver(ctx, observer); err != nil {
+			return ctrl.Result{}, err
+		}
+		observer.SetStatusCondition(
+			crdv1.TypeDegradedObserver,
+			metav1.ConditionTrue,
+			"Finalizing",
+			fmt.Sprintf("Finalizer operations for Observer %s name were successfully accomplished", observer.Name),
+		)
+
+		if err := r.Status().Update(ctx, observer); err != nil {
+			logger.Error(err, "Failed to update Observer status")
+			return ctrl.Result{}, err
+		}
+
+		logger.Info("Removing Finalizer for Observer after successfully perform the operations")
+		if ok := controllerutil.RemoveFinalizer(observer, observerFinalizer); !ok {
+			logger.Info("Failed to remove finalizer for Observer")
+			return ctrl.Result{Requeue: true}, nil
+		}
+
+		if err := r.Update(ctx, observer); err != nil {
+			logger.Error(err, "Failed to remove finalizer for Observer")
+			return ctrl.Result{}, err
+		}
+	}
+	return ctrl.Result{}, nil
+}
+
+func (r *ObserverReconciler) deletePod(ctx context.Context, observer *crdv1.Observer, found *v1.Pod) (ctrl.Result, error) {
+	if found.Status.Phase == "Succeeded" || found.Status.Phase == "Failed" {
+		logger := log.FromContext(ctx)
+
+		if observer.GetLabels()[observerAnnotationTimeToDelete] == "" {
+			labels := found.GetLabels()
+			if labels == nil {
+				labels = make(map[string]string, 1)
+			}
+			labels[observerAnnotationTimeToDelete] = "true"
+			observer.Labels = labels
+			if err := r.Update(ctx, observer); err != nil {
+				logger.Error(err, "Can not update Observer labels")
+				return reconcile.Result{Requeue: true}, nil
+			}
+			logger.Info("Updated Observer Labels")
+			return reconcile.Result{RequeueAfter: time.Duration(time.Second.Seconds() * float64(observer.Spec.Interval))}, nil
+		}
+
+		if found.GetAnnotations()[observerAnnotationTimeToDelete] != "" {
+			ttd, err := strconv.ParseInt(found.GetAnnotations()[observerAnnotationTimeToDelete], 10, 64)
+			if err != nil {
+				logger.Error(err, "can not get time from pod annotation")
+				ttd = time.Now().Add(-time.Second).Unix()
+			}
+			now := time.Now().Unix()
+			if now > time.Unix(ttd, 0).Unix() {
+				if err := r.reFetchObserver(ctx, observer); err != nil {
+					return ctrl.Result{}, err
+				}
+				observer.SetStatusCondition(
+					crdv1.TypeAvailableObserver,
+					metav1.ConditionFalse,
+					"Reconciling",
+					fmt.Sprintf("Deleting old Pod for custom resource (%s)", observer.Name),
+				)
+				if err := r.Status().Update(ctx, observer); err != nil {
+					logger.Error(err, "Failed to update Observer status")
+					return ctrl.Result{}, err
+				}
+				logger.Info("Deleting old Pod", "now", now, "ttd", ttd)
+				if err = r.Delete(ctx, found); err != nil {
+					logger.Error(err, "Can not deleteObserver old Pod")
+					return ctrl.Result{}, err
+				}
+				if err := r.reFetchObserver(ctx, observer); err != nil {
+					return ctrl.Result{}, err
+				}
+
+				labels := observer.GetLabels()
+				labels[observerAnnotationTimeToDelete] = ""
+				observer.Labels = labels
+				if err = r.Update(ctx, observer); err != nil {
+					logger.Error(err, "Can not update Observer labels")
+					return reconcile.Result{Requeue: true}, nil
+				}
+				if err := r.reFetchObserver(ctx, observer); err != nil {
+					return ctrl.Result{}, err
+				}
+				observer.SetStatusCondition(
+					crdv1.TypeAvailableObserver,
+					metav1.ConditionTrue,
+					"Reconciling",
+					fmt.Sprintf("Waiting for new reconciliation for custom resource (%s)", observer.Name),
+				)
+				if err := r.Status().Update(ctx, observer); err != nil {
+					logger.Error(err, "Failed to update Observer status")
+					return ctrl.Result{}, err
+				}
+			}
+			//logger.Info("Reconciling again - no deletion yet", "now", now, "ttd", ttd)
+		}
+	}
+	return reconcile.Result{}, nil
+}
+
+//+kubebuilder:rbac:groups=crd.test.kateops.com,resources=observers,verbs=get;list;watch;create;update;patch;deleteObserver
 //+kubebuilder:rbac:groups=crd.test.kateops.com,resources=observers/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=crd.test.kateops.com,resources=observers/finalizers,verbs=update
 
@@ -58,107 +254,198 @@ const SEC = 1000000000
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.17.0/pkg/reconcile
 func (r *ObserverReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
-	logger.Info("reconcile observer")
 
-	var pod = &v12.Pod{}
-	var crd = crdv1.Observer{}
-	err := r.Get(ctx, req.NamespacedName, &crd)
-	if err != nil {
-		logger.Error(err, err.Error())
+	var observer = crdv1.Observer{}
+	//logger.Info("Observer Reconciling")
+	if err := r.Get(ctx, req.NamespacedName, &observer); err != nil {
+		if errors.IsNotFound(err) {
+			logger.Info("Observer resource not found. Ignoring since object must be deleted")
+			return ctrl.Result{}, nil
+		}
+		// Error reading the object - requeue the request.
+		logger.Error(err, "Failed to get Observer")
 		return ctrl.Result{}, err
 	}
-	newPod := NewPodForCR(&crd)
 
-	err = r.Get(ctx, req.NamespacedName, pod)
-	if err != nil {
-		logger.Info(fmt.Sprintf("pod not found '%s' - recreating", req.NamespacedName))
+	if result, err := r.checkConditions(ctx, &observer); err != nil {
+		return result, err
+	}
 
-		err = ctrl.SetControllerReference(&crd, newPod, r.Scheme)
+	if result, err := r.addFinalizer(ctx, &observer); err != nil {
+		return result, err
+	}
+
+	isObserverToBeDeleted := observer.DeletionTimestamp != nil
+	if isObserverToBeDeleted {
+		if result, err := r.deleteObserver(ctx, &observer); err != nil {
+			return result, err
+		}
+	}
+
+	// check if observer is currently not available - in process => available=false
+	if observer.IsStatusConditionFalse(crdv1.TypeAvailableObserver) {
+		logger.Info("Observer already busy, will try again in 5s")
+		return reconcile.Result{RequeueAfter: time.Second * 5}, nil
+	}
+
+	// create new Pod if not exists
+	found := &v1.Pod{}
+	if err := r.Get(ctx, types.NamespacedName{Name: observer.Name, Namespace: observer.Namespace}, found); err != nil {
+		if !errors.IsNotFound(err) {
+			return reconcile.Result{}, err
+		}
+		pod, err := r.newPod(&observer)
 		if err != nil {
 			return ctrl.Result{}, err
 		}
-		err = r.Create(ctx, newPod)
-		if err != nil {
-			logger.Error(err, err.Error())
-			return ctrl.Result{}, nil
-		}
-		return ctrl.Result{Requeue: true}, nil
-	} else {
-		if pod.Status.Phase == "Running" || pod.Status.Phase == "Pending" {
-			logger.Info(fmt.Sprintf("pod found '%s' - still running", req.NamespacedName))
-			return ctrl.Result{
-				Requeue:      true,
-				RequeueAfter: time.Duration(2 * SEC),
-			}, nil
-		}
+		logger.Info("Creating new Pod", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
 
-		logger.Info(fmt.Sprintf("pod found '%s' - deleting", req.NamespacedName))
-		err = r.Delete(ctx, newPod)
-		if err != nil {
-			logger.Error(err, err.Error())
-
+		if err = r.Create(ctx, pod); err != nil {
+			logger.Error(err, "Failed to create new Pod", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
+			return ctrl.Result{}, err
 		}
-		logger.Info(fmt.Sprintf("interval '%d'", crd.Spec.Interval*SEC))
-		return ctrl.Result{
-			RequeueAfter: time.Duration(crd.Spec.Interval * SEC),
-		}, nil
+		observer.SetStatusCondition(
+			crdv1.TypeAvailableObserver,
+			metav1.ConditionTrue,
+			"Reconciling",
+			fmt.Sprintf("Created new Pod for crd %s", observer.Name),
+		)
+
+		if err := r.Status().Update(ctx, &observer); err != nil {
+			logger.Error(err, "Failed to update Observer status")
+			return ctrl.Result{}, err
+		}
 	}
+	//logger.Info("Observer Reconcile Logic")
+
+	if result, err := r.deletePod(ctx, &observer, found); err != nil {
+		return result, err
+	}
+
+	if err := r.reFetchObserver(ctx, &observer); err != nil {
+		return ctrl.Result{}, err
+	}
+	observer.SetStatusCondition(
+		crdv1.TypeAvailableObserver,
+		metav1.ConditionTrue,
+		"Reconciling",
+		fmt.Sprintf("Reconciling done for custom resource (%s) successfully", observer.Name),
+	)
+
+	if err := r.Status().Update(ctx, &observer); err != nil {
+		logger.Error(err, "Failed to update Observer status")
+		return ctrl.Result{}, err
+	}
+	//logger.Info("Waiting for next loop in 1s")
+	return ctrl.Result{RequeueAfter: time.Second}, nil
 }
 
-func (r *ObserverReconciler) HandlePodEvents(ctx context.Context, pod client.Object) []reconcile.Request {
+func (r *ObserverReconciler) HandlePodEvents(ctx context.Context, obj client.Object) []reconcile.Request {
 	namespacedName := types.NamespacedName{
-		Namespace: pod.GetNamespace(),
-		Name:      pod.GetName(),
+		Namespace: obj.GetNamespace(),
+		Name:      obj.GetName(),
 	}
 	logger := log.FromContext(ctx)
-	logger.Info(fmt.Sprintf("handle update event - %s - ", namespacedName))
-	var getPod v12.Pod
-	err := r.Get(ctx, namespacedName, &getPod)
-	if err != nil {
-		return []reconcile.Request{
-			{NamespacedName: namespacedName},
-		}
+	var pod v1.Pod
+	if err := r.Get(ctx, namespacedName, &pod); err != nil {
+		return []reconcile.Request{}
 	}
 
-	return []reconcile.Request{}
+	annotations := pod.GetAnnotations()
+	if annotations[observerAnnotationProcessed] != "" {
+		return []reconcile.Request{}
+	}
+	if annotations == nil {
+		annotations = make(map[string]string, 1)
+	}
+
+	annotations[observerAnnotationProcessed] = "true"
+
+	var crdNamespaced types.NamespacedName
+	for _, owner := range pod.OwnerReferences {
+		if *owner.Controller {
+			crdNamespaced = types.NamespacedName{
+				Namespace: pod.Namespace,
+				Name:      owner.Name,
+			}
+		}
+	}
+	observer := crdv1.Observer{}
+	if err := r.Get(ctx, crdNamespaced, &observer); err != nil {
+		logger.Error(err, "Can not get Observer")
+		return []reconcile.Request{}
+	}
+
+	interval := time.Now().Add(time.Second * time.Duration(observer.Spec.Interval))
+	annotations[observerAnnotationTimeToDelete] = fmt.Sprintf("%d", interval.Unix())
+	pod.Annotations = annotations
+	if err := r.Update(ctx, &pod); err != nil {
+		return []reconcile.Request{}
+	}
+
+	return []reconcile.Request{
+		{NamespacedName: crdNamespaced},
+	}
 }
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *ObserverReconciler) SetupWithManager(mgr ctrl.Manager) error {
+
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&crdv1.Observer{}).
+		For(&crdv1.Observer{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Watches(
-			&v12.Pod{},
+			&v1.Pod{},
 			handler.EnqueueRequestsFromMapFunc(r.HandlePodEvents),
 			builder.WithPredicates(predicate.Funcs{
 				DeleteFunc:  func(e event.DeleteEvent) bool { return false },
 				CreateFunc:  func(e event.CreateEvent) bool { return false },
 				GenericFunc: func(e event.GenericEvent) bool { return false },
-			}),
+				UpdateFunc: func(e event.UpdateEvent) bool {
+					newObject := e.ObjectNew.(*v1.Pod)
+					oldObject := e.ObjectOld.(*v1.Pod)
+					if (newObject.Status.Phase == "Succeeded" || newObject.Status.Phase == "Failed") && (oldObject.Status.Phase != "Succeeded" && oldObject.Status.Phase != "Failed") {
+						return true
+					}
+					return false
+
+				},
+			},
+			),
 		).
 		Complete(r)
 }
 
-func NewPodForCR(cr *crdv1.Observer) *v12.Pod {
+func (r *ObserverReconciler) doFinalizerOperationsForObserver(observer *crdv1.Observer) error {
+	return nil
+}
+
+func (r *ObserverReconciler) newPod(cr *crdv1.Observer) (*v1.Pod, error) {
 	labels := map[string]string{
-		"app": cr.Name,
+		"app":                          cr.Name,
+		"app.kubernetes.io/managed-by": "ObserverController",
 	}
 
-	return &v12.Pod{
+	pod := &v1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      cr.Name,
 			Namespace: cr.Namespace,
 			Labels:    labels,
 		},
-		Spec: v12.PodSpec{
-			Containers: []v12.Container{
+		Spec: v1.PodSpec{
+			Containers: []v1.Container{
 				{
-					Name:    "busybox",
+					Name:    "check",
 					Image:   "curlimages/curl:7.78.0",
 					Command: []string{"/bin/sh", "-c", fmt.Sprintf("curl -vvv -L %s", cr.Spec.Endpoint)},
 				},
 			},
-			RestartPolicy: v12.RestartPolicyOnFailure,
+			RestartPolicy: v1.RestartPolicyOnFailure,
 		},
 	}
+
+	if err := ctrl.SetControllerReference(cr, pod, r.Scheme); err != nil {
+		return nil, err
+	}
+
+	return pod, nil
 }

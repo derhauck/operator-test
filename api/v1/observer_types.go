@@ -18,6 +18,7 @@ package v1
 
 import (
 	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -25,16 +26,6 @@ import (
 // NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
 
 // ObserverSpec defines the desired state of Observer
-
-type ObserverTypes int
-
-const (
-	HTTP = iota
-)
-
-var values = map[ObserverTypes]string{
-	HTTP: "http",
-}
 
 type ObserverSpec struct {
 	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
@@ -53,12 +44,12 @@ type Status struct {
 	Status int    `json:"status,omitempty"`
 	Time   string `json:"time"`
 }
+
 type ObserverStatus struct {
 
 	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
 	// Important: Run "make" to regenerate code after modifying this file
-	LastSuccessful Status `json:"lastSuccessful,omitempty"`
-	LastFailed     Status `json:"lastFailed,omitempty"`
+	Conditions []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type" protobuf:"bytes,1,rep,name=conditions"`
 }
 
 //+kubebuilder:object:root=true
@@ -71,6 +62,22 @@ type Observer struct {
 
 	Spec   ObserverSpec   `json:"spec,omitempty"`
 	Status ObserverStatus `json:"status,omitempty"`
+}
+
+func (o *Observer) SetStatusCondition(conditionType ConditionType, status metav1.ConditionStatus, reason string, message string) bool {
+	return meta.SetStatusCondition(&o.Status.Conditions, metav1.Condition{
+		Type:    string(conditionType),
+		Status:  status,
+		Reason:  reason,
+		Message: message,
+	})
+}
+
+func (o *Observer) IsStatusConditionFalse(conditionType ConditionType) bool {
+	return meta.IsStatusConditionFalse(o.Status.Conditions, string(conditionType))
+}
+func (o *Observer) IsStatusConditionTrue(conditionType ConditionType) bool {
+	return meta.IsStatusConditionTrue(o.Status.Conditions, string(conditionType))
 }
 
 //+kubebuilder:object:root=true

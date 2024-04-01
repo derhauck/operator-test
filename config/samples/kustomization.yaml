@@ -1,5 +1,4 @@
 ## Append samples of your project ##
 resources:
-- crd_v1_operatortest.yaml
 - crd_v1_observer.yaml
 #+kubebuilder:scaffold:manifestskustomizesamples
