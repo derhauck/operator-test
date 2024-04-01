@@ -179,7 +179,7 @@ func (r *ObserverReconciler) deletePod(ctx context.Context, observer *crdv1.Obse
 				return reconcile.Result{Requeue: true}, nil
 			}
 			logger.Info("Updated Observer Labels")
-			return reconcile.Result{RequeueAfter: time.Duration(time.Second.Seconds() * float64(observer.Spec.Interval))}, nil
+			return reconcile.Result{RequeueAfter: time.Duration(time.Second.Seconds() * float64(observer.Spec.RetryAfterSeconds))}, nil
 		}
 
 		if found.GetAnnotations()[observerAnnotationTimeToDelete] != "" {
@@ -232,8 +232,13 @@ func (r *ObserverReconciler) deletePod(ctx context.Context, observer *crdv1.Obse
 					logger.Error(err, "Failed to update Observer status")
 					return ctrl.Result{}, err
 				}
+
+				// increment the current item to prepare the next pod
+				result, err := r.iterateCurrentItem(ctx, observer)
+				if err != nil {
+					return result, err
+				}
 			}
-			//logger.Info("Reconciling again - no deletion yet", "now", now, "ttd", ttd)
 		}
 	}
 	return reconcile.Result{}, nil
@@ -337,12 +342,6 @@ func (r *ObserverReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 			if result, err := r.createPod(ctx, &observer); err != nil {
 				return result, err
 			}
-
-			result, err := r.iterateCurrentItem(ctx, &observer)
-			if err != nil {
-				return result, err
-			}
-
 		} else {
 			return reconcile.Result{}, err
 		}
@@ -406,8 +405,12 @@ func (r *ObserverReconciler) HandlePodEvents(ctx context.Context, obj client.Obj
 		logger.Error(err, "Can not get Observer")
 		return []reconcile.Request{}
 	}
+	interval := time.Now()
+	// when last element of entries then add interval to pause
+	if observer.Status.CurrentItem == len(observer.Spec.Entries)-1 {
+		interval = interval.Add(time.Second * time.Duration(observer.Spec.RetryAfterSeconds))
+	}
 
-	interval := time.Now().Add(time.Second * time.Duration(observer.Spec.Interval))
 	annotations[observerAnnotationTimeToDelete] = fmt.Sprintf("%d", interval.Unix())
 	pod.Annotations = annotations
 	if err := r.Update(ctx, &pod); err != nil {

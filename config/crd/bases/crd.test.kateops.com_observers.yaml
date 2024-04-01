@@ -66,11 +66,11 @@ spec:
                   - name
                   type: object
                 type: array
-              interval:
+              retryAfterSeconds:
                 type: integer
             required:
             - entries
-            - interval
+            - retryAfterSeconds
             type: object
           status:
             properties:

@@ -76,8 +76,8 @@ type ObserverSpec struct {
 
 	// Foo is an example field of Observer. Edit observer_types.go to remove/update
 
-	Entries  []ObserverSpecEntry `json:"entries"`
-	Interval int                 `json:"interval"`
+	Entries           []ObserverSpecEntry `json:"entries"`
+	RetryAfterSeconds int                 `json:"retryAfterSeconds"`
 }
 
 // ObserverStatus defines the observed state of Observer
