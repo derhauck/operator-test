@@ -446,6 +446,6 @@ func (r *ObserverReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Complete(r)
 }
 
-func (r *ObserverReconciler) doFinalizerOperationsForObserver(observer *crdv1.Observer) error {
+func (r *ObserverReconciler) doFinalizerOperationsForObserver(_ *crdv1.Observer) error {
 	return nil
 }
