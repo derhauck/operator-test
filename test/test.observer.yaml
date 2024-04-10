@@ -1,0 +1,26 @@
+apiVersion: crd.test.kateops.com/v1
+kind: Observer
+metadata:
+  name: test
+  namespace: default
+spec:
+  entries:
+#    - endpoint: https://google.de
+#      name: google
+#    - endpoint: https://bing.com
+#      name: bing
+#    - endpoint: https://yahoo.com
+#      name: yahoo
+#    - endpoint: https://bing.com
+#      name: bing2
+    - endpoint: http://driving-journal-estimate-server-svc:8080
+      name: dje
+    - endpoint: http://driving-journal-estimate-server-svc:8080
+      name: dje1
+    - endpoint: http://driving-journal-estimate-server-svc:8080
+      name: dje2
+    - endpoint: http://driving-journal-estimate-server-svc:8080
+      name: dje3
+    - endpoint: http://driving-journal-estimate-server-svc:8080
+      name: dje4
+  retryAfterSeconds: 5

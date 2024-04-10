@@ -39,6 +39,7 @@ spec:
           spec:
             properties:
               entries:
+                description: Entries list of configurations for the observing process
                 items:
                   description: ObserverSpec defines the desired state of Observer
                   properties:
@@ -67,12 +68,15 @@ spec:
                   type: object
                 type: array
               retryAfterSeconds:
+                description: RetryAfterSeconds how long the process will wait until
+                  it starts the process again in seconds
                 type: integer
             required:
             - entries
             - retryAfterSeconds
             type: object
           status:
+            description: ObserverStatus defines the observed state of Observer
             properties:
               conditions:
                 description: |-
@@ -148,6 +152,34 @@ spec:
                 type: array
               currentItem:
                 type: integer
+              iterationResults:
+                description: results of status checks
+                items:
+                  properties:
+                    podStatusList:
+                      items:
+                        properties:
+                          name:
+                            type: string
+                          status:
+                            description: PodPhase is a label for the condition of
+                              a pod at the current time.
+                            type: string
+                          time:
+                            type: string
+                        required:
+                        - name
+                        - time
+                        type: object
+                      type: array
+                    status:
+                      description: PodPhase is a label for the condition of a pod
+                        at the current time.
+                      type: string
+                  required:
+                  - status
+                  type: object
+                type: array
             required:
             - currentItem
             type: object

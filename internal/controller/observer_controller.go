@@ -69,13 +69,25 @@ func (r *ObserverReconciler) checkConditions(ctx context.Context, observer *crdv
 			return ctrl.Result{}, err
 		}
 
-		observer.SetStatusCondition(
+		observer.Status.SetStatusCondition(
 			crdv1.TypeAvailableObserver,
 			metav1.ConditionUnknown,
 			"Reconciling",
-			"Starting reconciliation",
+			fmt.Sprintf("Starting reconciliation for observer: %s ", observer.Name),
 		)
-
+		observer.Status.SetStatusCondition(
+			crdv1.TypeSuccessLastStatusObserver,
+			metav1.ConditionUnknown,
+			"Finalizing",
+			fmt.Sprintf("Starting reconciliation for observer: %s ", observer.Name),
+		)
+		observer.Status.SetStatusCondition(
+			crdv1.TypeSuccessStatusForLastFiveObserver,
+			metav1.ConditionUnknown,
+			"Finalizing",
+			fmt.Sprintf("Starting reconciliation for observer: %s ", observer.Name),
+		)
+		observer.Status.InitIterationResults()
 		if err := r.Status().Update(ctx, observer); err != nil {
 			logger.Error(err, "Failed to update Observer status")
 			return ctrl.Result{}, err
@@ -117,7 +129,7 @@ func (r *ObserverReconciler) deleteObserver(ctx context.Context, observer *crdv1
 			return ctrl.Result{}, err
 		}
 
-		observer.SetStatusCondition(
+		observer.Status.SetStatusCondition(
 			crdv1.TypeDegradedObserver,
 			metav1.ConditionUnknown,
 			"Finalizing",
@@ -137,7 +149,7 @@ func (r *ObserverReconciler) deleteObserver(ctx context.Context, observer *crdv1
 		if err := r.reFetchObserver(ctx, observer); err != nil {
 			return ctrl.Result{}, err
 		}
-		observer.SetStatusCondition(
+		observer.Status.SetStatusCondition(
 			crdv1.TypeDegradedObserver,
 			metav1.ConditionTrue,
 			"Finalizing",
@@ -173,9 +185,13 @@ func (r *ObserverReconciler) deletePod(ctx context.Context, observer *crdv1.Obse
 				labels = make(map[string]string, 1)
 			}
 			labels[observerAnnotationTimeToDelete] = "true"
+
+			if err := r.reFetchObserver(ctx, observer); err != nil {
+				return ctrl.Result{}, nil
+			}
 			observer.Labels = labels
 			if err := r.Update(ctx, observer); err != nil {
-				logger.Error(err, "Can not update Observer labels")
+				//logger.Error(err, "Can not update Observer labels")
 				return reconcile.Result{Requeue: true}, nil
 			}
 			logger.Info("Updated Observer Labels")
@@ -193,7 +209,7 @@ func (r *ObserverReconciler) deletePod(ctx context.Context, observer *crdv1.Obse
 				if err := r.reFetchObserver(ctx, observer); err != nil {
 					return ctrl.Result{}, err
 				}
-				observer.SetStatusCondition(
+				observer.Status.SetStatusCondition(
 					crdv1.TypeAvailableObserver,
 					metav1.ConditionFalse,
 					"Reconciling",
@@ -201,7 +217,7 @@ func (r *ObserverReconciler) deletePod(ctx context.Context, observer *crdv1.Obse
 				)
 				if err := r.Status().Update(ctx, observer); err != nil {
 					logger.Error(err, "Failed to update Observer status")
-					return ctrl.Result{}, err
+					return ctrl.Result{}, nil
 				}
 				logger.Info("Deleting old Pod", "now", now, "ttd", ttd)
 				if err = r.Delete(ctx, found); err != nil {
@@ -222,7 +238,7 @@ func (r *ObserverReconciler) deletePod(ctx context.Context, observer *crdv1.Obse
 				if err := r.reFetchObserver(ctx, observer); err != nil {
 					return ctrl.Result{}, err
 				}
-				observer.SetStatusCondition(
+				observer.Status.SetStatusCondition(
 					crdv1.TypeAvailableObserver,
 					metav1.ConditionTrue,
 					"Reconciling",
@@ -236,7 +252,8 @@ func (r *ObserverReconciler) deletePod(ctx context.Context, observer *crdv1.Obse
 				// increment the current item to prepare the next pod
 				result, err := r.iterateCurrentItem(ctx, observer)
 				if err != nil {
-					return result, err
+					logger.Error(err, "Can not iterate current result Item")
+					return result, nil
 				}
 			}
 		}
@@ -246,7 +263,7 @@ func (r *ObserverReconciler) deletePod(ctx context.Context, observer *crdv1.Obse
 
 func (r *ObserverReconciler) createPod(ctx context.Context, observer *crdv1.Observer) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
-	pod, err := observer.Spec.Entries[observer.Status.CurrentItem].NewPod(observer.Namespace)
+	pod, err := observer.NewPod()
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -258,7 +275,7 @@ func (r *ObserverReconciler) createPod(ctx context.Context, observer *crdv1.Obse
 		logger.Error(err, "Failed to create new Pod", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
 		return ctrl.Result{}, err
 	}
-	observer.SetStatusCondition(
+	observer.Status.SetStatusCondition(
 		crdv1.TypeAvailableObserver,
 		metav1.ConditionTrue,
 		"Reconciling",
@@ -269,6 +286,7 @@ func (r *ObserverReconciler) createPod(ctx context.Context, observer *crdv1.Obse
 		logger.Error(err, "Failed to update Observer status")
 		return ctrl.Result{}, err
 	}
+	logger.Info("Created new Pod", "Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
 	return ctrl.Result{}, nil
 }
 
@@ -337,7 +355,7 @@ func (r *ObserverReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 
 	// create new Pod if not exists
 	found := &v1.Pod{}
-	if err := r.Get(ctx, types.NamespacedName{Name: observer.Spec.Entries[observer.Status.CurrentItem].Name, Namespace: observer.Namespace}, found); err != nil {
+	if err := r.Get(ctx, types.NamespacedName{Name: observer.GetCurrentPodName(), Namespace: observer.Namespace}, found); err != nil {
 		if errors.IsNotFound(err) {
 			if result, err := r.createPod(ctx, &observer); err != nil {
 				return result, err
@@ -355,7 +373,7 @@ func (r *ObserverReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	if err := r.reFetchObserver(ctx, &observer); err != nil {
 		return ctrl.Result{}, err
 	}
-	observer.SetStatusCondition(
+	observer.Status.SetStatusCondition(
 		crdv1.TypeAvailableObserver,
 		metav1.ConditionTrue,
 		"Reconciling",
@@ -364,9 +382,8 @@ func (r *ObserverReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 
 	if err := r.Status().Update(ctx, &observer); err != nil {
 		//logger.Error(err, "Failed to update Observer status")
-		return ctrl.Result{}, err
+		return ctrl.Result{}, nil
 	}
-	//logger.Info("Waiting for next loop in 1s")
 	return ctrl.Result{RequeueAfter: time.Second}, nil
 }
 
@@ -406,16 +423,44 @@ func (r *ObserverReconciler) HandlePodEvents(ctx context.Context, obj client.Obj
 		return []reconcile.Request{}
 	}
 	interval := time.Now()
+
 	// when last element of entries then add interval to pause
 	if observer.Status.CurrentItem == len(observer.Spec.Entries)-1 {
 		interval = interval.Add(time.Second * time.Duration(observer.Spec.RetryAfterSeconds))
 	}
 
+	if observer.Status.CurrentItem == 0 {
+		observer.Status.AddNewIterationResult()
+	}
+
+	if pod.Status.Phase == v1.PodSucceeded {
+		observer.Status.SetStatusCondition(
+			crdv1.TypeSuccessLastStatusObserver,
+			metav1.ConditionTrue,
+			"Finalizing",
+			fmt.Sprintf("Last status was success for observer: %s ", observer.Name),
+		)
+	} else {
+		observer.Status.SetStatusCondition(
+			crdv1.TypeSuccessLastStatusObserver,
+			metav1.ConditionFalse,
+			"Finalizing",
+			fmt.Sprintf("Last status was failure for observer: %s ", observer.Name),
+		)
+	}
+
+	observer.Status.AddPodStatusToLatestIterationResult(crdv1.PodStatus{
+		Status: pod.Status.Phase,
+		Name:   observer.GetCurrentEntry().Name,
+		Time:   time.Now().UTC().Format("2006-01-02 15:04:05"),
+	}).EvaluateStatus()
+	observer.Status.GetLatestIterationResult().Evaluate()
 	annotations[observerAnnotationTimeToDelete] = fmt.Sprintf("%d", interval.Unix())
 	pod.Annotations = annotations
 	if err := r.Update(ctx, &pod); err != nil {
 		return []reconcile.Request{}
 	}
+	_ = r.Status().Update(ctx, &observer)
 
 	return []reconcile.Request{
 		{NamespacedName: crdNamespaced},
