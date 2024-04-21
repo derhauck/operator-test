@@ -17,7 +17,7 @@ jobs:
 
       - uses: mr-smithers-excellent/docker-build-push@v6
         with:
-          image: derhauck/operator-test
+          image: operator-test
           registry: ghcr.io
           enableBuildKit: true
           username: ${{ github.actor }}
