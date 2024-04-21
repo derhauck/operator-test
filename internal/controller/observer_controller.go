@@ -35,6 +35,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"strconv"
+	"sync"
 	"time"
 )
 
@@ -42,6 +43,7 @@ import (
 type ObserverReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+	mu     sync.Mutex
 }
 
 const observerAnnotationTimeToDelete = "observer.crd.test.kateops.com/ttd"
@@ -260,7 +262,6 @@ func (r *ObserverReconciler) deletePod(ctx context.Context, observer *crdv1.Obse
 	}
 	return reconcile.Result{}, nil
 }
-
 func (r *ObserverReconciler) createPod(ctx context.Context, observer *crdv1.Observer) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 	pod, err := observer.NewPod()
@@ -313,6 +314,9 @@ func (r *ObserverReconciler) iterateCurrentItem(ctx context.Context, observer *c
 	return ctrl.Result{}, nil
 }
 
+// +kubebuilder:rbac:groups=core,resources=pods,verbs=get;watch;list;create;delete;update;patch;
+// +kubebuilder:rbac:groups=core,resources=pods/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=core,resources=pods/finalizers,verbs=update
 //+kubebuilder:rbac:groups=crd.test.kateops.com,resources=observers,verbs=get;list;watch;create;update;patch;deleteObserver
 //+kubebuilder:rbac:groups=crd.test.kateops.com,resources=observers/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=crd.test.kateops.com,resources=observers/finalizers,verbs=update
@@ -332,6 +336,7 @@ func (r *ObserverReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		return ctrl.Result{}, err
 	}
 
+	logger.Info("check conditions")
 	if result, err := r.checkConditions(ctx, &observer); err != nil {
 		return result, err
 	}
@@ -347,6 +352,7 @@ func (r *ObserverReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		}
 	}
 
+	logger.Info("is busy")
 	// check if observer is currently not available - in process => available=false
 	if observer.IsStatusConditionFalse(crdv1.TypeAvailableObserver) {
 		logger.Info("Observer already busy, will try again in 5s")
@@ -366,10 +372,12 @@ func (r *ObserverReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	}
 	//logger.Info("Observer Reconcile Logic")
 
+	logger.Info("clean up pod")
 	if result, err := r.deletePod(ctx, &observer, found); err != nil {
 		return result, err
 	}
 
+	logger.Info("update observer status")
 	if err := r.reFetchObserver(ctx, &observer); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -399,6 +407,7 @@ func (r *ObserverReconciler) HandlePodEvents(ctx context.Context, obj client.Obj
 	}
 
 	annotations := pod.GetAnnotations()
+	logger.Info("pod stats", "status", pod.Status)
 	if annotations[observerAnnotationProcessed] != "" {
 		return []reconcile.Request{}
 	}
@@ -432,16 +441,16 @@ func (r *ObserverReconciler) HandlePodEvents(ctx context.Context, obj client.Obj
 	if observer.Status.CurrentItem == 0 {
 		observer.Status.AddNewIterationResult()
 	}
-
+	changed := false
 	if pod.Status.Phase == v1.PodSucceeded {
-		observer.Status.SetStatusCondition(
+		changed = observer.Status.SetStatusCondition(
 			crdv1.TypeSuccessLastStatusObserver,
 			metav1.ConditionTrue,
 			"Finalizing",
 			fmt.Sprintf("Last status was success for observer: %s ", observer.Name),
 		)
 	} else {
-		observer.Status.SetStatusCondition(
+		changed = observer.Status.SetStatusCondition(
 			crdv1.TypeSuccessLastStatusObserver,
 			metav1.ConditionFalse,
 			"Finalizing",
@@ -449,18 +458,23 @@ func (r *ObserverReconciler) HandlePodEvents(ctx context.Context, obj client.Obj
 		)
 	}
 
-	observer.Status.AddPodStatusToLatestIterationResult(crdv1.PodStatus{
+	observer.Status.AddPodStatusToLatestIterationResult(&crdv1.PodStatus{
 		Status: pod.Status.Phase,
 		Name:   observer.GetCurrentEntry().Name,
 		Time:   time.Now().UTC().Format("2006-01-02 15:04:05"),
 	}).EvaluateStatus()
 	observer.Status.GetLatestIterationResult().Evaluate()
+	logger.Info("observer condition changed", "changed", changed)
 	annotations[observerAnnotationTimeToDelete] = fmt.Sprintf("%d", interval.Unix())
 	pod.Annotations = annotations
 	if err := r.Update(ctx, &pod); err != nil {
-		return []reconcile.Request{}
+		//return []reconcile.Request{}
+		logger.Error(err, err.Error())
 	}
-	_ = r.Status().Update(ctx, &observer)
+
+	if err := r.Status().Update(ctx, &observer); err != nil {
+		logger.Error(err, err.Error())
+	}
 
 	return []reconcile.Request{
 		{NamespacedName: crdNamespaced},

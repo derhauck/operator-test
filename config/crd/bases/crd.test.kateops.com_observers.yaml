@@ -44,13 +44,19 @@ spec:
                   description: ObserverSpec defines the desired state of Observer
                   properties:
                     endpoint:
+                      description: Endpoint will directly use 'curl' on the specified
+                        endpoint
                       type: string
                     name:
+                      description: Name of the entry to check
+                      type: string
+                    schemaEndpoint:
+                      description: OpenApi will use OpenAPI config to validate with
+                        schemathesis
                       type: string
                     secretRef:
-                      description: |-
-                        SecretReference represents a Secret Reference. It has enough information to retrieve secret
-                        in any namespace
+                      description: SecretRef allows to expose all keys inside a referenced
+                        secret to the pod environment
                       properties:
                         name:
                           description: name is unique within a namespace to reference
@@ -63,7 +69,6 @@ spec:
                       type: object
                       x-kubernetes-map-type: atomic
                   required:
-                  - endpoint
                   - name
                   type: object
                 type: array
@@ -169,6 +174,7 @@ spec:
                             type: string
                         required:
                         - name
+                        - status
                         - time
                         type: object
                       type: array

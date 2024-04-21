@@ -38,13 +38,29 @@ const (
 
 // ObserverSpec defines the desired state of Observer
 type ObserverSpecEntry struct {
-	Endpoint  string              `json:"endpoint"`
+	// Endpoint will directly use 'curl' on the specified endpoint
+	Endpoint string `json:"endpoint,omitempty"`
+	// SecretRef allows to expose all keys inside a referenced secret to the pod environment
 	SecretRef *v1.SecretReference `json:"secretRef,omitempty"`
-	Name      string              `json:"name"`
+	// Name of the entry to check
+	Name string `json:"name"`
+	// OpenApi will use OpenAPI config to validate with schemathesis
+	SchemaEndpoint string `json:"schemaEndpoint,omitempty"`
 }
 
 func (o *Observer) NewPod() (*v1.Pod, error) {
 	current := o.Spec.Entries[o.Status.CurrentItem]
+	image := "curlimages/curl:7.78.0"
+	command := fmt.Sprintf("curl -vvv -L %s", current.Endpoint)
+
+	if current.SchemaEndpoint != "" {
+		image = "schemathesis/schemathesis:stable"
+		command = fmt.Sprintf("schemathesis run --checks all  %s", current.SchemaEndpoint)
+		if current.Endpoint != "" {
+			command = fmt.Sprintf("%s --base-url %s", command, current.Endpoint)
+		}
+	}
+
 	labels := map[string]string{
 		"app.kubernetes.io/managed-by": "ObserverController",
 		"app":                          o.Name,
@@ -53,8 +69,8 @@ func (o *Observer) NewPod() (*v1.Pod, error) {
 
 	container := v1.Container{
 		Name:    "check",
-		Image:   "curlimages/curl:7.78.0",
-		Command: []string{"/bin/sh", "-c", fmt.Sprintf("curl -vvv -L %s", current.Endpoint)},
+		Image:   image,
+		Command: []string{"/bin/sh", "-c", command},
 	}
 
 	if current.SecretRef != nil {
@@ -103,7 +119,7 @@ func AddWithMaxLen[T any](slice []T, item T, max int) []T {
 }
 
 type PodStatus struct {
-	Status v1.PodPhase `json:"status,omitempty"`
+	Status v1.PodPhase `json:"status"`
 	Time   string      `json:"time"`
 	Name   string      `json:"name"`
 }
@@ -126,12 +142,12 @@ func (i *IterationResult) Evaluate() {
 	}
 }
 
-func (i *IterationResult) Add(item PodStatus) {
+func (i *IterationResult) Add(item *PodStatus) {
 	if i.PodStatusList == nil {
-		temp := make([]PodStatus, 1)
+		temp := make([]PodStatus, 0)
 		i.PodStatusList = &temp
 	}
-	temp := append(*i.PodStatusList, item)
+	temp := append(*i.PodStatusList, *item)
 	i.PodStatusList = &temp
 }
 
@@ -157,18 +173,21 @@ func (o *ObserverStatus) AddNewIterationResult() *ObserverStatus {
 	o.IterationResults = &temp
 	return o
 }
-func (o *ObserverStatus) AddPodStatusToLatestIterationResult(item PodStatus) *ObserverStatus {
+func (o *ObserverStatus) AddPodStatusToLatestIterationResult(item *PodStatus) *ObserverStatus {
 	o.GetLatestIterationResult().Add(item)
 	return o
 }
 
 func (o *ObserverStatus) GetLatestIterationResult() *IterationResult {
-	var temp *IterationResult
-	if o.IterationResults != nil {
+	var temp = IterationResult{PodStatusList: &[]PodStatus{}, Status: v1.PodPending}
+	if o.IterationResults != nil && len(*o.IterationResults) > 0 {
 		results := *o.IterationResults
-		temp = &results[len(*o.IterationResults)-1]
+		current := &results[len(*o.IterationResults)-1]
+		if current != nil {
+			temp = *current
+		}
 	}
-	return temp
+	return &temp
 }
 
 func (o *ObserverStatus) SetStatusCondition(conditionType ConditionType, status metav1.ConditionStatus, reason string, message string) bool {
@@ -184,9 +203,10 @@ func (o *ObserverStatus) EvaluateStatus() {
 	var failure = false
 	var status v1.PodPhase = v1.PodSucceeded
 	for _, iteration := range *o.IterationResults {
-		if iteration.Status != v1.PodSucceeded {
+		if iteration.Status != v1.PodSucceeded && iteration.Status != "" {
 			failure = true
 			status = iteration.Status
+
 		}
 	}
 
@@ -194,14 +214,14 @@ func (o *ObserverStatus) EvaluateStatus() {
 		o.SetStatusCondition(
 			TypeSuccessStatusForLastFiveObserver,
 			metav1.ConditionFalse,
-			string(status),
+			fmt.Sprintf("pod:%s", string(status)),
 			fmt.Sprintf("Evaluate observer to contain recent failure"),
 		)
 	} else {
 		o.SetStatusCondition(
 			TypeSuccessStatusForLastFiveObserver,
 			metav1.ConditionTrue,
-			string(status),
+			fmt.Sprintf("pod:%s", string(status)),
 			fmt.Sprintf("Evaluate observer to contain no recent failure"),
 		)
 	}
