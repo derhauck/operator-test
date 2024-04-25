@@ -142,13 +142,14 @@ func (i *IterationResult) Evaluate() {
 	}
 }
 
-func (i *IterationResult) Add(item *PodStatus) {
+func (i *IterationResult) Add(item *PodStatus) *IterationResult {
 	if i.PodStatusList == nil {
 		temp := make([]PodStatus, 0)
 		i.PodStatusList = &temp
 	}
 	temp := append(*i.PodStatusList, *item)
 	i.PodStatusList = &temp
+	return i
 }
 
 // ObserverStatus defines the observed state of Observer
@@ -159,35 +160,86 @@ type ObserverStatus struct {
 	Conditions  []metav1.Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type" protobuf:"bytes,1,rep,name=conditions"`
 	CurrentItem int                `json:"currentItem"`
 	// results of status checks
-	IterationResults *[]IterationResult `json:"iterationResults,omitempty" patchStrategy:"merge" patchMergeKey:"type" protobuf:"bytes,1,rep,name=iterationResults"`
+	IterationResults Stack `json:"iterationResults" patchStrategy:"merge" patchMergeKey:"type" protobuf:"bytes,1,rep,name=iterationResults"`
+}
+
+type Stack struct {
+	Length int                `json:"length"`
+	Values []*IterationResult `json:"values"`
+}
+
+func NewStack(size int) Stack {
+	return Stack{
+		Length: size,
+		Values: []*IterationResult{},
+	}
+}
+
+func (s *Stack) Push(element *IterationResult) *Stack {
+	if s.Length == 0 {
+		return s
+	}
+	if len(s.Values) == s.Length {
+		s.Values = s.Values[1:]
+	}
+	newStack := append(s.Values, element)
+	s.Values = newStack
+	return s
+}
+
+func (s *Stack) Pop() *IterationResult {
+	if len(s.Values) == 1 {
+		element := s.Values[0]
+		s.Values = make([]*IterationResult, 0)
+		return element
+	}
+
+	if len(s.Values) > 1 {
+		s.Values = s.Values[:len(s.Values)-1]
+	}
+	return nil
+}
+
+func (s *Stack) Get() *IterationResult {
+	if s.Values != nil && len(s.Values) > 0 && s.Values[len(s.Values)-1] != nil {
+		return s.Values[len(s.Values)-1]
+	}
+	return nil
+}
+
+func (s *Stack) GetAll() []*IterationResult {
+	return s.Values
 }
 
 func (o *ObserverStatus) InitIterationResults() {
-	o.IterationResults = &[]IterationResult{}
+	o.IterationResults = NewStack(5)
 }
 
 func (o *ObserverStatus) AddNewIterationResult() *ObserverStatus {
-	temp := AddWithMaxLen(*o.IterationResults, IterationResult{
+	//temp := AddWithMaxLen(*o.IterationResults, IterationResult{
+	//	PodStatusList: &[]PodStatus{},
+	//}, 4)
+	o.IterationResults.Push(&IterationResult{
 		PodStatusList: &[]PodStatus{},
-	}, 4)
-	o.IterationResults = &temp
-	return o
-}
-func (o *ObserverStatus) AddPodStatusToLatestIterationResult(item *PodStatus) *ObserverStatus {
-	o.GetLatestIterationResult().Add(item)
+	})
 	return o
 }
 
 func (o *ObserverStatus) GetLatestIterationResult() *IterationResult {
-	var temp = IterationResult{PodStatusList: &[]PodStatus{}, Status: v1.PodPending}
-	if o.IterationResults != nil && len(*o.IterationResults) > 0 {
-		results := *o.IterationResults
-		current := &results[len(*o.IterationResults)-1]
-		if current != nil {
-			temp = *current
-		}
+	//var temp = IterationResult{PodStatusList: &[]PodStatus{}, Status: v1.PodPending}
+	//if o.IterationResults == nil {
+	//	o.IterationResults = &[]IterationResult{temp}
+	//}
+	//current := (*o.IterationResults)[o.CurrentItem]
+	//if current.PodStatusList == nil {
+	//	(*o.IterationResults)[o.CurrentItem] = temp
+	//	current = temp
+	//}
+	if o.IterationResults.Get() == nil {
+		o.AddNewIterationResult()
 	}
-	return &temp
+
+	return o.IterationResults.Get()
 }
 
 func (o *ObserverStatus) SetStatusCondition(conditionType ConditionType, status metav1.ConditionStatus, reason string, message string) bool {
@@ -202,7 +254,7 @@ func (o *ObserverStatus) SetStatusCondition(conditionType ConditionType, status 
 func (o *ObserverStatus) EvaluateStatus() {
 	var failure = false
 	var status v1.PodPhase = v1.PodSucceeded
-	for _, iteration := range *o.IterationResults {
+	for _, iteration := range o.IterationResults.GetAll() {
 		if iteration.Status != v1.PodSucceeded && iteration.Status != "" {
 			failure = true
 			status = iteration.Status

@@ -177,6 +177,25 @@ func (r *ObserverReconciler) deleteObserver(ctx context.Context, observer *crdv1
 	return ctrl.Result{}, nil
 }
 
+func (r *ObserverReconciler) reconcilePod(ctx context.Context, observer *crdv1.Observer, pod *v1.Pod) (ctrl.Result, error) {
+	if pod.Status.Phase != v1.PodPending && pod.Status.Phase != v1.PodRunning {
+		annotations := pod.GetAnnotations()
+		if annotations == nil {
+			annotations = make(map[string]string)
+		}
+		if annotations[observerAnnotationTimeToDelete] == "" {
+			interval := time.Now().Add(time.Second * time.Duration(observer.Spec.RetryAfterSeconds))
+			annotations[observerAnnotationTimeToDelete] = fmt.Sprintf("%d", interval.Unix())
+			pod.Annotations = annotations
+			if err := r.Update(ctx, pod); err != nil {
+				return reconcile.Result{}, err
+			}
+		}
+	}
+
+	return reconcile.Result{}, nil
+}
+
 func (r *ObserverReconciler) deletePod(ctx context.Context, observer *crdv1.Observer, found *v1.Pod) (ctrl.Result, error) {
 	if found.Status.Phase == "Succeeded" || found.Status.Phase == "Failed" {
 		logger := log.FromContext(ctx)
@@ -370,8 +389,9 @@ func (r *ObserverReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 			return reconcile.Result{}, err
 		}
 	}
-	//logger.Info("Observer Reconcile Logic")
-
+	if result, err := r.reconcilePod(ctx, &observer, found); err != nil {
+		return result, err
+	}
 	logger.Info("clean up pod")
 	if result, err := r.deletePod(ctx, &observer, found); err != nil {
 		return result, err
@@ -441,16 +461,15 @@ func (r *ObserverReconciler) HandlePodEvents(ctx context.Context, obj client.Obj
 	if observer.Status.CurrentItem == 0 {
 		observer.Status.AddNewIterationResult()
 	}
-	changed := false
 	if pod.Status.Phase == v1.PodSucceeded {
-		changed = observer.Status.SetStatusCondition(
+		observer.Status.SetStatusCondition(
 			crdv1.TypeSuccessLastStatusObserver,
 			metav1.ConditionTrue,
 			"Finalizing",
 			fmt.Sprintf("Last status was success for observer: %s ", observer.Name),
 		)
 	} else {
-		changed = observer.Status.SetStatusCondition(
+		observer.Status.SetStatusCondition(
 			crdv1.TypeSuccessLastStatusObserver,
 			metav1.ConditionFalse,
 			"Finalizing",
@@ -458,13 +477,13 @@ func (r *ObserverReconciler) HandlePodEvents(ctx context.Context, obj client.Obj
 		)
 	}
 
-	observer.Status.AddPodStatusToLatestIterationResult(&crdv1.PodStatus{
+	observer.Status.GetLatestIterationResult().Add(&crdv1.PodStatus{
 		Status: pod.Status.Phase,
 		Name:   observer.GetCurrentEntry().Name,
 		Time:   time.Now().UTC().Format("2006-01-02 15:04:05"),
-	}).EvaluateStatus()
-	observer.Status.GetLatestIterationResult().Evaluate()
-	logger.Info("observer condition changed", "changed", changed)
+	}).Evaluate()
+	observer.Status.EvaluateStatus()
+	//logger.Info("observer status changed", "iterationResults", observer.Status.GetLatestIterationResult().PodStatusList)
 	annotations[observerAnnotationTimeToDelete] = fmt.Sprintf("%d", interval.Unix())
 	pod.Annotations = annotations
 	if err := r.Update(ctx, &pod); err != nil {
